@@ -27,7 +27,8 @@ from PySide6.QtWidgets import QApplication, QPushButton  # noqa: E402
 
 from app import GITHUB_URL, SITE_URL, MainWindow  # noqa: E402
 from core.oring_core import (COMPRESSION_TABLE, PRESSURE_PRESETS, compression_band,
-                             design, edge_fillet_lead, water_depth_pressure)  # noqa: E402
+                             design, edge_fillet_lead, groove_std_pair,
+                             recommend_compression, water_depth_pressure)  # noqa: E402
 from ui import theme  # noqa: E402
 
 
@@ -315,6 +316,59 @@ try:
         log.append(f"   d₂={d2v:.2f} -> r₁ {e['r1'][0]:.2f}~{e['r1'][1]:.2f}"
                    f"  Zmin={e['lead_zmin']:.2f}（{e['lead_zmin_src']}）"
                    f"  标准表内={'是' if e['in_table'] else '否'}")
+
+    # ---- 压缩率「余量上限」约束：各工况修正不得把值顶到区间上限 ----
+    import math as _math
+    _viol = []
+    _cases = [("hyd", "往复", "", "radial"), ("pneu", "往复", "气动 / 空气", "radial"),
+              ("static", "静态", "", "radial"), ("axial", "静态", "", "axial")]
+    for kind, motion, med, md in _cases:
+        for d2v in (1.80, 2.65, 3.55, 5.30, 7.00):
+            lo, hi, _s = compression_band(d2v, kind)
+            h_std, _b, _t = groove_std_pair(d2v, kind)
+            base0 = max(lo, min(hi, (d2v - h_std) / d2v * 100.0))
+            cap = 0.5 * max(0.0, hi - base0)
+            for p in (0.0, 1.0, 16.0, 32.0):
+                for hd in (60, 70, 90):
+                    for cr in (0.0, 1.5):
+                        e, _w = recommend_compression(md, motion, p, hd,
+                                                      d2=d2v, medium=med, creep_pp=cr)
+                        # 推荐值对外保留 2 位小数，判据同样按 2 位收口，避免四舍五入残差
+                        if e > round(base0 + cap, 2) + 1e-9:
+                            _viol.append((kind, d2v, p, hd, cr, e, base0 + cap))
+    log.append(f"{'✓' if not _viol else '✗'} 压缩率余量约束"
+               f"（修正合计 ≤ 至区间上限余量的一半）："
+               f"{'全部满足' if not _viol else f'{len(_viol)} 例越界 {_viol[:2]}'}")
+
+    # ---- 拉伸 → 截面减薄 → 实际压缩量 链路自洽 ----
+    _bad2 = []
+    for md, dia in (("radial_piston", 16.30), ("radial_rod", 25.0), ("axial", 63.0)):
+        r = design(md, dia, 1.0, 5, 40, "水 / 水-乙二醇",
+                   motion="静态", d2=1.80 if md != "axial" else 3.55)
+        mm = r["metrics"]
+        thin_exp = 1.0 / _math.sqrt(1.0 + max(mm["stretch_pct"], 0.0) / 100.0)
+        checks = {
+            "thin": abs(mm["thin_factor"] - thin_exp) < 1e-9,
+            "cord": abs(mm["cord_loaded"] - mm["cord_free"] * thin_exp) < 1e-9,
+            "comp": abs(mm["compression_mm_corr"]
+                        - (mm["cord_loaded"] - r["groove"]["h"])) < 1e-9,
+            "stretch_mm": abs(mm["stretch_mm"]
+                              - (mm["stretch_ref"] - (r["oring"]["d1"]
+                                 if md != "axial"
+                                 else r["oring"]["d1"] + mm["cord_free"]))) < 1e-9,
+            "corr_le_nom": mm["compression_pct_corr"] <= mm["compression_pct"] + 1e-9,
+        }
+        if not all(checks.values()):
+            _bad2.append((md, [k for k, v in checks.items() if not v]))
+        log.append(f"   拉伸链[{md}]：δ={mm['stretch_pct']:.2f}%"
+                   f" 拉伸量={mm['stretch_mm']:+.2f} mm"
+                   f" 线径 {mm['cord_free']:.2f}→{mm['cord_loaded']:.3f}"
+                   f"（×{mm['thin_factor']:.3f}）"
+                   f" 压缩量 {mm['compression_mm']:.3f}→{mm['compression_mm_corr']:.3f} mm"
+                   f"（{mm['compression_pct']:.2f}%→{mm['compression_pct_corr']:.2f}%）"
+                   f" {'✓' if all(checks.values()) else '✗'}")
+    log.append(f"{'✓' if not _bad2 else '✗'} 拉伸/减薄/实际压缩量链路自洽："
+               f"{'全部通过' if not _bad2 else f'{_bad2}'}")
 
     # ---- 导出报告链路 ----
     txt = rad._report_text()

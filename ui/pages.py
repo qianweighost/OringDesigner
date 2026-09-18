@@ -752,7 +752,8 @@ class DesignPage(QWidget):
                         f"推荐 {m['compression_range'][0]:.0f}~{m['compression_range'][1]:.0f}%")
         st = self._state(m["stretch_pct"], m["stretch_range"])
         self.m_stretch.set(f"{m['stretch_pct']:.2f}%", st,
-                           f"推荐 {m['stretch_range'][0]:.0f}~{m['stretch_range'][1]:.0f}%")
+                           f"推荐 {m['stretch_range'][0]:.0f}~{m['stretch_range'][1]:.0f}%"
+                           f"　内径增量 {m['stretch_mm']:+.2f} mm")
         st = self._state(m["fill_pct"], m["fill_range"])
         self.m_fill.set(f"{m['fill_pct']:.1f}%", st,
                         f"推荐 {m['fill_range'][0]:.0f}~{m['fill_range'][1]:.0f}%")
@@ -767,7 +768,19 @@ class DesignPage(QWidget):
         rw.add("截面积", f"{math.pi * (o['d2'] / 2) ** 2:.2f} mm²")
         rw.add("线径来源", o["d2_src"], color=TEXT_DIM)
         rw.add_sep()
+        st_ok = m["stretch_range"][0] <= m["stretch_pct"] <= m["stretch_range"][1]
+        rw.add("拉伸率 δ", f"{m['stretch_pct']:.2f}%", bold=True,
+               color=OK if st_ok else WARN)
+        rw.add("拉伸量", f"{m['stretch_mm']:+.2f} mm"
+                         f"（对{m['stretch_ref_label']} φ{m['stretch_ref']:.2f}）",
+               color=ACCENT)
+        rw.add("拉伸后线径", f"{m['cord_loaded']:.3f} mm"
+                             f"（自由 {m['cord_free']:.2f} ×{m['thin_factor']:.3f}）",
+               color=TEXT_DIM)
         rw.add(fit["installed_label"], f"φ{fit['installed']:.2f} mm", bold=True)
+        if not r["mode"].startswith("axial") and m["thin_factor"] < 0.999:
+            rw.add("减薄后" + fit["installed_label"],
+                   f"φ{fit['installed_corr']:.2f} mm", color=TEXT_DIM)
         rw.add(f"与{fit['seal_surface_label']}单侧干涉",
                f"{fit['interference']:.3f} mm", color=ACCENT, bold=True)
 
@@ -803,6 +816,9 @@ class DesignPage(QWidget):
         rw = self.row_fit
         rw.clear()
         rw.add("压缩量 c", f"{m['compression_mm']:.3f} mm", bold=True)
+        rw.add("实际压缩量", f"{m['compression_mm_corr']:.3f} mm", color=ACCENT)
+        rw.add("实际压缩率", f"{m['compression_pct_corr']:.2f}%"
+                             f"（按减薄后线径）", color=TEXT_DIM)
         rw.add("O 圈截面积", f"{m['oring_area']:.2f} mm²")
         if m["gap_allow"] is not None:
             gap_txt = f"{m['gap_allow']:.3f} mm（单侧）"
@@ -1374,11 +1390,22 @@ HELP_HTML = """
 若误按「往复」设计，压缩量会明显不足，深水或长期浸泡时极易渗漏。
 深水或长期浸泡建议取区间上部，并加装挡圈抑制挤出。</div>
 
-<h3>拉伸率</h3>
+<h3>拉伸率与拉伸量</h3>
 <p><code>δ = (沟槽底径 − O 圈内径) / O 圈内径 × 100%</code>（径向密封）</p>
 <p>轻微的拉伸（通常 1%~4%）能让 O 圈紧贴沟槽、装配时不易脱落；但拉伸过大
 会使截面变细、加速老化，导致密封失效。轴向密封则按「自由中径 = 内径 + 线径
 与沟槽中心直径对齐」校核。</p>
+<p><b>拉伸量（mm）</b>就是上式分子的绝对增量，即
+<code>Δ = 沟槽底径 − O 圈内径</code>（轴向为中心直径 − 自由中径）。结果页
+「密封圈规格」里同时给出百分比与毫米值，方便直接对图纸标注。</p>
+<div class="warn"><b>拉伸会让线径变细 —— 实际压缩量小于名义值。</b><br>
+橡胶近似体积不可压，内径被撑大 δ 后截面随之缩小，线径按
+<code>d₂' = d₂ / √(1 + δ)</code> 减薄（δ 用小数）。因此：<br>
+· 名义压缩量 <code>c = d₂ − h</code>（按自由线径，即指标卡与槽深反算所用的定义）；<br>
+· <b>实际压缩量</b> <code>c' = d₂' − h</code>，实际压缩率 <code>ε' = (d₂' − h) / d₂'</code>。<br>
+本例 δ≈4% 时线径约减薄 2%，名义与实际压缩率相差约 1.4 个百分点。
+结果页「装配校核」同时列出两者，<b>校核沟槽用名义值（与标准一致），
+评估实际接触应力用实际值</b>。拉伸率越大，这项差异越显著。</div>
 
 <h3>填充率</h3>
 <p><code>K = O 圈截面积 / 沟槽截面积 × 100%</code></p>
@@ -1402,7 +1429,7 @@ HELP_HTML = """
 <tr><th>影响途径</th><th>机理</th><th>程序处理</th></tr>
 <tr><td>线膨胀系数 α</td><td>温度变化时沟槽与 O 圈各自胀缩，压缩率漂移 ≈ ΔT·(α<sub>橡胶</sub> − α<sub>壳体</sub>)</td><td>给出漂移量；高温下越出允许区间则告警</td></tr>
 <tr><td>弹性模量 E</td><td>塑料壳体刚度低，受压后沟槽变形、张开间隙</td><td>超出经验许用压力时告警，建议加挡圈或加金属嵌件</td></tr>
-<tr><td>蠕变 / 应力松弛</td><td>塑料长期受压会失去部分压缩量</td><td>初始压缩率在标准区间内上浮 1.5 个百分点补偿</td></tr>
+<tr><td>蠕变 / 应力松弛</td><td>塑料长期受压会失去部分压缩量</td><td>提出 +1.5 个百分点补偿，与其余修正合并后受「至多占用至允许上限余量的一半」约束</td></tr>
 </table>
 <p>金属壳体 α：铸铁 10.5、碳钢 11.7、不锈钢 17.3、黄铜 19.0、铝合金 23.6 ×10⁻⁶/K
 —— 尺寸稳定，但 α 越小升温后压缩率增量越大。塑料壳体 α 明显更大：PC 68、ABS 85、

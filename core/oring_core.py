@@ -803,7 +803,9 @@ def housing_effect(code: str, material_code: str,
         creep = 1.5
         notes.append(
             f"壳体为塑料（{h['name']}），长期受压会产生蠕变与应力松弛，"
-            f"初始压缩率已在标准允许区间内上浮 {creep:.1f} 个百分点作补偿。")
+            f"已提出 {creep:.1f} 个百分点的压缩率补偿；该项与静密封、压力等修正"
+            f"合并计算，并受「至多占用至允许上限余量的一半」约束，"
+            f"实际取值见「压缩率依据」。")
         pmax = h["p_max"]
         if pmax is not None and pressure > pmax:
             warnings.append(
@@ -952,12 +954,21 @@ def compression_band(d2: float, kind: str) -> tuple[float, float, str]:
 
 def recommend_compression(mode: str, motion: str, pressure: float,
                           hardness: int, d2: float = 3.55,
-                          medium: str = "") -> tuple[float, str]:
+                          medium: str = "",
+                          creep_pp: float = 0.0) -> tuple[float, str]:
     """返回 (推荐压缩率 %, 说明)。
 
-    取值逻辑：以国标附录 A 的允许区间为边界，以标准沟槽深度隐含的压缩率作
-    基准（保证与 GB/T 3452.3 沟槽尺寸表自洽），再按压力 / 硬度在区间内微调。
+    取值逻辑分三步：
+      1) 以国标附录 A 的允许区间为边界，以**标准沟槽深度隐含的压缩率**作基准，
+         保证推荐值与 GB/T 3452.3 表1/表2/表3 的沟槽尺寸互相自洽；
+      2) 按运动方式 / 压力 / 硬度 / 壳体蠕变累加修正量；
+      3) 修正量之和受「余量上限」约束 —— **最多占用基准到允许上限之间余量的一半**。
+         这一步是必要的：静密封本来就在区间偏上（如 d₂ 1.80 的标准槽深已到 26.7%，
+         而允许上限 30.5%），若各路修正无约束地叠加，任何工况都会顶死上限，
+         热膨胀、公差与胶料溶胀就没有余量了。
+
     mode: radial / axial
+    creep_pp: 塑料壳体的蠕变 / 应力松弛补偿（百分点），由 housing_effect 给出
     """
     kind = compression_kind(mode, motion, medium)
     lo, hi, src = compression_band(d2, kind)
@@ -973,25 +984,46 @@ def recommend_compression(mode: str, motion: str, pressure: float,
     if e_std > hi + 0.05 or e_std < lo - 0.05:
         why += "（注意：该档标准槽深与压缩率表略有出入，已按允许区间收口，建议对照标准原文复核）"
 
+    delta = 0.0
+    parts: list[str] = []
+
     if kind in ("static", "axial"):
-        base = max(lo, min(hi, base + 0.10 * half))
-        why += "；静密封取中偏上以建立可靠的初始接触应力"
+        delta += 0.10 * half
+        parts.append("静密封取中偏上以建立可靠的初始接触应力")
     else:
-        base = max(lo, min(hi, base - 0.05 * half))
-        why += "；动密封取中偏下以减小摩擦与发热"
+        delta -= 0.05 * half
+        parts.append("动密封取中偏下以减小摩擦与发热")
         if motion == "回转":
-            why += "；回转工况附录 A 未单列，已按动密封从严取值"
+            parts.append("回转工况附录 A 未单列，已按动密封从严取值")
 
     if pressure > 20.0:
-        base = max(lo, min(hi, base + 0.15 * half))
-        why += "；高压工况向区间上部靠拢以补偿挤出变形"
+        delta += 0.15 * half
+        parts.append("高压工况向区间上部靠拢以补偿挤出变形")
     elif pressure < 2.0:
-        base = max(lo, min(hi, base + 0.10 * half))
-        why += "；低压 / 浸水工况向区间上部靠拢以保证初始密封"
+        delta += 0.10 * half
+        parts.append("低压 / 浸水工况向区间上部靠拢以保证初始密封")
 
     if hardness >= 90:
-        base = max(lo, min(hi, base + 0.5))
-        why += "；高硬度胶料回弹差，压缩率略增"
+        delta += 0.5
+        parts.append("高硬度胶料回弹差，压缩率略增")
+
+    if creep_pp:
+        delta += float(creep_pp)
+        parts.append(f"塑料壳体蠕变 / 应力松弛补偿 {creep_pp:+.1f} 个百分点")
+
+    # 余量约束：修正量最多占用「基准 → 允许上限」余量的一半
+    room = max(0.0, hi - base)
+    cap = 0.5 * room
+    if delta > cap:
+        parts.append(
+            f"以上修正合计本为 {delta:+.2f} 个百分点，受「至多占用至允许上限余量的一半」"
+            f"约束收口至 {cap:+.2f}，距允许上限仍留 {hi - (base + cap):.2f} 个百分点"
+            f"供热膨胀、公差与胶料溶胀使用")
+        delta = cap
+
+    base = max(lo, min(hi, base + delta))
+    if parts:
+        why += "；" + "；".join(parts)
 
     return round(base, 2), why
 
@@ -1270,25 +1302,25 @@ def design(mode: str,
             f"需与供应商确认可行性。"
         )
 
-    # ---------- 3. 压缩率 ----------
-    comp_kind = compression_kind(calc_mode, motion, medium)
-    comp_lo, comp_hi, comp_rule = compression_band(d2, comp_kind)
-    if compression_pct is None:
-        compression_pct, comp_why = recommend_compression(
-            calc_mode, motion, pressure, hardness, d2=d2, medium=medium)
-        comp_src = "自动推荐"
-    else:
-        comp_src = "手动指定"
-        comp_why = f"由用户指定；{comp_rule} 允许 {comp_lo:.1f}%~{comp_hi:.1f}%"
-
-    # ---------- 3b. 壳体（沟槽）材料影响 ----------
+    # ---------- 3. 壳体（沟槽）材料影响 ----------
+    # 必须排在压缩率之前：塑料壳体的蠕变补偿要作为一项修正参与压缩率推荐，
+    # 才能被统一的「余量上限」约束一起收口，而不是事后另行上浮顶到区间上限。
     he = housing_effect(housing, material, t_high, pressure)
     if he.get("code"):
         notes.extend(he["notes"])
         warnings.extend(he["warnings"])
-        # 塑料壳体的蠕变补偿只作用于自动推荐，不覆盖用户手填的压缩率
-        if he["creep_pp"] and comp_src == "自动推荐":
-            compression_pct = round(min(comp_hi, compression_pct + he["creep_pp"]), 2)
+
+    # ---------- 3b. 压缩率 ----------
+    comp_kind = compression_kind(calc_mode, motion, medium)
+    comp_lo, comp_hi, comp_rule = compression_band(d2, comp_kind)
+    if compression_pct is None:
+        compression_pct, comp_why = recommend_compression(
+            calc_mode, motion, pressure, hardness, d2=d2, medium=medium,
+            creep_pp=he.get("creep_pp", 0.0))
+        comp_src = "自动推荐"
+    else:
+        comp_src = "手动指定"
+        comp_why = f"由用户指定；{comp_rule} 允许 {comp_lo:.1f}%~{comp_hi:.1f}%"
 
     # ---------- 4. 挡圈判定（须在沟槽宽度解算之前，挡圈要占用槽宽）----------
     gap_allow = allowed_extrusion_gap(hardness, pressure)
@@ -1484,6 +1516,30 @@ def design(mode: str,
     # 理想内径：径向密封为槽底径（O 圈套在其上）；轴向为「中心径 − 线径」
     d1_ideal = geom["groove_bottom"] if not is_axial else geom["surface"] - d2
 
+    # ---------- 6b. 拉伸量 / 截面减薄 / 实际（减薄后）压缩量 ----------
+    # 橡胶近似体积不可压：内径被撑大 ε 后，线径按 1/√(1+ε) 减薄、截面变小，
+    # 于是「装配时真正压进去的量」比名义值 (d2 − h) 小。这一层以前只用于修正
+    # 装配后外径，没有进指标卡，容易被误读成压缩率偏大。
+    thin = 1.0 / math.sqrt(1.0 + max(actual_stretch, 0.0) / 100.0)
+    cord_loaded = d2 * thin                      # 拉伸后的实际线径
+    comp_mm_corr = cord_loaded - h               # 拉伸减薄后的实际压缩量
+    comp_pct_corr = comp_mm_corr / cord_loaded * 100.0
+    if is_axial:
+        stretch_ref, stretch_ref_label = geom["surface"], "沟槽中心直径 dm"
+        stretch_mm = geom["surface"] - (d1_std + d2)      # 自由中径的增量
+    else:
+        stretch_ref, stretch_ref_label = geom["groove_bottom"], "槽底直径"
+        stretch_mm = geom["groove_bottom"] - d1_std       # 内径的增量
+    if thin < 0.999:
+        notes.append(
+            f"O 圈内径 φ{d1_std:.2f} 套装到 {stretch_ref_label} φ{stretch_ref:.2f} mm，"
+            f"拉伸 {actual_stretch:.2f}%（{stretch_mm:+.2f} mm）；胶料近似体积不可压，"
+            f"线径相应由 {d2:.2f} mm 减薄至 {cord_loaded:.3f} mm（×{thin:.3f}），"
+            f"因此装配后实际压缩量为 {comp_mm_corr:.3f} mm、实际压缩率 "
+            f"{comp_pct_corr:.2f}% —— 指标卡上的 {comp_pct:.2f}% 按自由线径定义，"
+            f"属名义值，两者差 {(comp_pct - comp_pct_corr):.2f} 个百分点。"
+        )
+
     # ---------- 7. 填充率 ----------
     a_oring = math.pi * (d2 / 2.0) ** 2
     a_groove = h * b
@@ -1626,6 +1682,14 @@ def design(mode: str,
             "compression_range": (e_lo, e_hi),
             "stretch_pct": actual_stretch,
             "stretch_range": (st_lo, st_hi),
+            "stretch_mm": stretch_mm,
+            "stretch_ref": stretch_ref,
+            "stretch_ref_label": stretch_ref_label,
+            "thin_factor": thin,
+            "cord_free": d2,
+            "cord_loaded": cord_loaded,
+            "compression_mm_corr": comp_mm_corr,
+            "compression_pct_corr": comp_pct_corr,
             "fill_pct": fill,
             "fill_range": (f_lo, f_hi),
             "oring_area": a_oring,
