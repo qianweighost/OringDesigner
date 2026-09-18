@@ -24,7 +24,7 @@ from ui import icons, theme  # noqa: E402
 from ui.pages import DesignPage, HelpPage, MaterialPage, StandardPage  # noqa: E402
 
 APP_NAME = "O 形密封圈设计计算器"
-APP_VERSION = "1.1"
+APP_VERSION = "1.2"
 APP_SUB = "径向 / 轴向密封沟槽设计 · 材料与邵氏硬度选型 · GB/T 3452 与 ISO 3601 系列"
 
 GITHUB_URL = "https://github.com/qianweighost/OringDesigner"
@@ -148,7 +148,7 @@ class MainWindow(QMainWindow):
         super().keyPressEvent(ev)
 
 
-APP_USER_MODEL_ID = "qianwei.OringDesigner.1.1"
+APP_USER_MODEL_ID = "qianwei.OringDesigner.1.2"
 
 
 def _set_windows_app_id():

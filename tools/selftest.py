@@ -26,7 +26,8 @@ from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication, QPushButton  # noqa: E402
 
 from app import GITHUB_URL, SITE_URL, MainWindow  # noqa: E402
-from core.oring_core import PRESSURE_PRESETS, water_depth_pressure  # noqa: E402
+from core.oring_core import (COMPRESSION_TABLE, PRESSURE_PRESETS, compression_band,
+                             design, edge_fillet_lead, water_depth_pressure)  # noqa: E402
 from ui import theme  # noqa: E402
 
 
@@ -239,6 +240,81 @@ try:
                f"（{ra['groove']['b_src']}）"
                f"ε={ra['metrics']['compression_pct']:.1f}% "
                f"{ra['material']['code']} {ra['hardness']['value']}A")
+
+    # ---- GB/T 3452.3-2005 附录A：压缩率表逐值核对与单调性 ----
+    bad = []
+    for k, tbl in COMPRESSION_TABLE.items():
+        for d2, (lo, hi) in tbl.items():
+            gl, gh, _s = compression_band(d2, k)
+            if abs(gl - lo) > 1e-6 or abs(gh - hi) > 1e-6:
+                bad.append((k, d2, gl, gh))
+    log.append(f"{'✓' if not bad else '✗'} 附录A 四类压缩率表逐值核对："
+               f"{'全部一致' if not bad else f'偏差 {bad[:3]}'}")
+
+    d2s = (1.80, 2.65, 3.55, 5.30, 7.00)
+    hi_ser = [compression_band(x, "static")[1] for x in d2s]
+    mono = all(hi_ser[i] >= hi_ser[i + 1] for i in range(len(hi_ser) - 1))
+    log.append(f"{'✓' if mono else '✗'} 静密封允许上限随线径单调下降：{hi_ser}")
+
+    higher = all(compression_band(x, "static")[1] > compression_band(x, "pneu")[1]
+                 for x in d2s)
+    log.append(f"{'✓' if higher else '✗'} 静密封区间整体高于动密封：{higher}")
+
+    # ---- 水深预设不得覆盖运动方式（水深只是压力来源）----
+    cb = rad.in_preset.combo
+    rad.in_motion.combo.setCurrentText("静态")
+    di = next((i for i in range(cb.count()) if "水深 20 m" in cb.itemText(i)), None)
+    if di is not None:
+        cb.setCurrentIndex(di)
+        kept = rad.in_motion.current()
+        log.append(f"{'✓' if kept == '静态' else '✗'} 水深预设不改运动方式："
+                   f"仍为「{kept}」")
+
+    # ---- IPX 预设应为静密封，且压缩率落在静密封表区间内 ----
+    ii = next((i for i in range(cb.count()) if "IPX8" in cb.itemText(i)), None)
+    if ii is not None:
+        cb.setCurrentIndex(ii)
+        rad.recalc()
+        r = rad._res
+        mm = r["metrics"]
+        inb = mm["compression_range"][0] <= mm["compression_pct"] <= mm["compression_range"][1]
+        log.append(f"{'✓' if (rad.in_motion.current() == '静态' and inb) else '✗'} "
+                   f"IPX8 预设：运动「{rad.in_motion.current()}」"
+                   f" p={r['input']['pressure']:.3f} MPa"
+                   f" ε={mm['compression_pct']:.2f}%"
+                   f" 区间={mm['compression_range'][0]:.1f}~{mm['compression_range'][1]:.1f}%")
+    cb.setCurrentIndex(0)
+
+    # ---- 壳体材料：热漂移 + 塑料蠕变补偿 ----
+    for code in (None, "al", "pom"):
+        idx = 0
+        if code:
+            for i in range(rad.in_housing.combo.count()):
+                if rad.in_housing.combo.itemText(i).startswith(code):
+                    idx = i
+                    break
+        rad.in_housing.combo.setCurrentIndex(idx)
+        rad.recalc()
+        r = rad._res
+        ho = r.get("housing") or {}
+        log.append(f"✓ 壳体[{code or '未指定'}] ε={r['metrics']['compression_pct']:.2f}%"
+                   f" 热漂移={ho.get('d_comp_pp', 0):+.2f}pp"
+                   f" 蠕变补偿={ho.get('creep_pp', 0):.1f}pp"
+                   f" α={ho.get('alpha', 0):.1f} 警告={len(r['warnings'])}")
+    rad.in_housing.combo.setCurrentIndex(0)
+
+    # ---- 安装圆角 / 导入倒角 ----
+    rad.recalc()
+    asm = rad._res["assembly"]
+    log.append(f"✓ 圆角/倒角：r₁ {asm['r1'][0]:.2f}~{asm['r1'][1]:.2f}"
+               f"  r₂ {asm['r2'][0]:.2f}~{asm['r2'][1]:.2f}"
+               f"  导入角 {asm['lead_angle'][0]:.0f}°~{asm['lead_angle'][1]:.0f}°"
+               f"  Zmin={asm['lead_zmin']:.2f} mm")
+    for d2v in (1.80, 3.55, 7.00, 12.00):
+        e = edge_fillet_lead(d2v)
+        log.append(f"   d₂={d2v:.2f} -> r₁ {e['r1'][0]:.2f}~{e['r1'][1]:.2f}"
+                   f"  Zmin={e['lead_zmin']:.2f}（{e['lead_zmin_src']}）"
+                   f"  标准表内={'是' if e['in_table'] else '否'}")
 
     # ---- 导出报告链路 ----
     txt = rad._report_text()

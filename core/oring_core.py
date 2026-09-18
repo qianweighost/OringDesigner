@@ -141,16 +141,90 @@ GROOVE_STD = {
     7.00: {"static": (5.60, 9.50), "dynamic": (5.95, 9.90), "axial": (5.10, 9.50)},
 }
 
-# 沟槽尺寸锚点表 (d2, h, b)，取 GB/T 3452.3 与 AS568 工业沟槽常用值。
+# 沟槽尺寸锚点表 (d2, h/t, b)，逐值取自 GB/T 3452.3-2005 表1 / 表2 / 表3。
+#   static 表2 静密封    hyd 表2 液压动密封    pneu 表2 气动动密封    axial 表3 轴向密封
 # 非锚点线径在相邻锚点间按线径线性插值；超出两端时按末段斜率外推。
+# 校验：由这些槽深反算的压缩率，全部落在附录 A 的允许区间内（两张表自洽）。
 _GROOVE_ANCHORS = {
-    "static": [(1.80, 1.42, 2.40), (2.65, 2.10, 3.60), (3.55, 2.80, 4.80),
-               (5.30, 4.20, 7.10), (7.00, 5.60, 9.50)],
-    "dynamic": [(1.80, 1.52, 2.60), (2.65, 2.22, 3.80), (3.55, 3.00, 5.00),
-                (5.30, 4.50, 7.50), (7.00, 5.95, 9.90)],
-    "axial": [(1.80, 1.25, 2.40), (2.65, 1.90, 3.60), (3.55, 2.60, 4.80),
-              (5.30, 3.80, 7.10), (7.00, 5.10, 9.50)],
+    "static": [(1.80, 1.32, 2.40), (2.65, 2.00, 3.60), (3.55, 2.90, 4.80),
+               (5.30, 4.31, 7.10), (7.00, 5.85, 9.50)],
+    "hyd": [(1.80, 1.35, 2.40), (2.65, 2.10, 3.60), (3.55, 2.85, 4.80),
+            (5.30, 4.35, 7.10), (7.00, 5.85, 9.50)],
+    "pneu": [(1.80, 1.40, 2.20), (2.65, 2.15, 3.40), (3.55, 2.95, 4.60),
+             (5.30, 4.50, 6.90), (7.00, 6.10, 9.30)],
+    "axial": [(1.80, 1.28, 2.60), (2.65, 1.97, 3.80), (3.55, 2.75, 5.00),
+              (5.30, 4.24, 7.30), (7.00, 5.72, 9.70)],
 }
+
+# 旧版类别名兼容：dynamic 视同液压动密封
+_GROOVE_ALIAS = {"dynamic": "hyd"}
+
+# ---- 沟槽圆角与导入倒角（GB/T 3452.3-2005 表1 / 表2 / 表3）----
+# 槽底圆角 r1 按线径分档（标准只给了 3 档，按邻近原则选取）
+_R1_BANDS = [("<=2.65", 0.20, 0.40), ("3.55~5.30", 0.40, 0.80), (">=7.00", 0.80, 1.20)]
+# 槽口（棱）圆角 r2：标准全档统一
+_R2_RANGE = (0.10, 0.30)
+# 导入倒角角度：标准未给角度，行业通行 15°~30°（推荐 20°）
+_LEAD_ANGLE_RANGE = (15.0, 30.0)
+_LEAD_ANGLE_REC = 20.0
+# 最小导角长度 Zmin（标准表1 明列，按线径取值，mm）
+_LEAD_ZMIN = {1.80: 1.10, 2.65: 1.50, 3.55: 1.80, 5.30: 2.70, 7.00: 3.60}
+
+# ---- 挡圈厚度占用（单侧一个挡圈的额外槽宽，mm）----
+# 由标准表1 的 b → b1 → b2 差值得到：b1-b = b2-b1 = 该值，是标准给出的挡圈占位。
+_BACKUP_ALLOWANCE = {1.80: 1.40, 2.65: 1.40, 3.55: 1.40, 5.30: 1.90, 7.00: 2.80}
+
+
+def backup_width_allowance(d2: float) -> float:
+    """单侧一个挡圈占用的额外槽宽（mm），取自标准表1 的 b1/b2 差值。"""
+    xs = sorted(_BACKUP_ALLOWANCE)
+    if d2 <= xs[0]:
+        return _BACKUP_ALLOWANCE[xs[0]]
+    if d2 >= xs[-1]:
+        return _BACKUP_ALLOWANCE[xs[-1]]
+    for i in range(len(xs) - 1):
+        x1, x2 = xs[i], xs[i + 1]
+        if x1 <= d2 <= x2:
+            k = (d2 - x1) / (x2 - x1)
+            return round(_BACKUP_ALLOWANCE[x1]
+                         + (_BACKUP_ALLOWANCE[x2] - _BACKUP_ALLOWANCE[x1]) * k, 2)
+    return _BACKUP_ALLOWANCE[xs[-1]]
+
+
+def edge_fillet_lead(d2: float) -> dict:
+    """沟槽圆角与导入倒角推荐值（GB/T 3452.3-2005）。
+
+    返回 dict：r1 槽底圆角、r2 槽口圆角、lead_angle 导入倒角角度、
+    lead_zmin 最小导角长度、以及是否落在标准表内的标记。
+    """
+    if d2 <= 2.65:
+        r1 = (0.20, 0.40)
+    elif d2 <= 5.30:
+        r1 = (0.40, 0.80)
+    else:
+        r1 = (0.80, 1.20)
+
+    zs = sorted(_LEAD_ZMIN)
+    if d2 <= zs[0]:
+        zmin, zsrc = _LEAD_ZMIN[zs[0]], f"按最小档 d₂ {zs[0]:.2f} 取值"
+    elif d2 >= zs[-1]:
+        zmin, zsrc = _LEAD_ZMIN[zs[-1]], f"按最大档 d₂ {zs[-1]:.2f} 取值"
+    else:
+        zmin = None
+        for i in range(len(zs) - 1):
+            x1, x2 = zs[i], zs[i + 1]
+            if x1 <= d2 <= x2:
+                k = (d2 - x1) / (x2 - x1)
+                zmin = round(_LEAD_ZMIN[x1] + (_LEAD_ZMIN[x2] - _LEAD_ZMIN[x1]) * k, 2)
+                break
+        zsrc = "插值"
+
+    return {
+        "r1": r1, "r2": _R2_RANGE,
+        "lead_angle": _LEAD_ANGLE_RANGE, "lead_angle_rec": _LEAD_ANGLE_REC,
+        "lead_zmin": zmin, "lead_zmin_src": zsrc,
+        "in_table": 1.80 <= d2 <= 7.00,
+    }
 
 # 由标准表反算出的线径比例系数（参考值，用于结果说明）
 _K_STATIC = 1.348   # b = K · d2
@@ -164,9 +238,11 @@ _E_AXIAL = 0.2821
 def groove_std_pair(d2: float, kind: str) -> tuple[float, float, str]:
     """按线径求标准槽深 / 槽宽。
 
-    kind: 'static' 径向静密封 | 'dynamic' 径向往复动密封 | 'axial' 轴向端面密封
+    kind: 'static' 径向静密封 | 'hyd' 液压动密封 | 'pneu' 气动动密封 | 'axial' 轴向密封
+          （旧名 'dynamic' 视同 'hyd'）
     返回 (h, b, 来源说明)
     """
+    kind = _GROOVE_ALIAS.get(kind, kind)
     pts = _GROOVE_ANCHORS.get(kind) or _GROOVE_ANCHORS["static"]
     # 命中锚点
     for x, h, b in pts:
@@ -189,22 +265,6 @@ def groove_std_pair(d2: float, kind: str) -> tuple[float, float, str]:
     return h1 + (h2 - h1) * k, b1 + (b2 - b1) * k, src
 
 
-# ---- 挡圈厚度占用（单侧一个挡圈的额外槽宽，mm）----
-# 按 AS568 单/双作用沟槽宽度差值折算，实际取值需以挡圈供应商样本复核。
-def backup_width_allowance(d2: float) -> float:
-    if d2 <= 2.00:
-        return 0.5
-    if d2 <= 3.00:
-        return 0.6
-    if d2 <= 4.00:
-        return 0.8
-    if d2 <= 6.00:
-        return 1.3
-    if d2 <= 8.00:
-        return 1.7
-    return 2.0
-
-
 def backup_ring_count(motion: str, is_axial: bool) -> int:
     """推荐挡圈数量。
 
@@ -215,6 +275,7 @@ def backup_ring_count(motion: str, is_axial: bool) -> int:
     if motion in ("往复", "回转"):
         return 2
     return 1
+
 
 # ---- 允许挤出间隙（单侧，mm）----
 # 行：邵氏 A 硬度；列：工作压力 MPa
@@ -281,7 +342,8 @@ def water_depth_pressure(depth_m: float) -> float:
     return round(RHO_WATER * _G * depth_m / 1e6, 4)
 
 
-def _depth_preset(m: float, motion: str = "静态", medium: str = "水 / 水-乙二醇",
+def _depth_preset(m: float, motion: str | None = None,
+                  medium: str = "水 / 水-乙二醇",
                   temp: tuple[int, int] = (5, 40)) -> dict:
     p = water_depth_pressure(m)
     return {
@@ -292,7 +354,26 @@ def _depth_preset(m: float, motion: str = "静态", medium: str = "水 / 水-乙
         "medium": medium,
         "motion": motion,
         "t": temp,
-        "note": f"按静水压 p = ρgh 计算（ρ=1000 kg/m³）：{m:g} m 水柱 ≈ {p:.3f} MPa",
+        "note": (f"按静水压 p = ρgh 计算（ρ=1000 kg/m³）：{m:g} m 水柱 ≈ {p:.3f} MPa。"
+                 f"水深只决定压力，不决定运动方式——水下执行机构选「往复」，"
+                 f"浸水壳体选「静态」，请按实际工况选择（见下方 IPX 预设）。"),
+    }
+
+
+def _ipx_preset(grade: str, m: float, desc: str) -> dict:
+    """防水等级（IEC 60529 / GB/T 4208）对应的浸水静密封工况。"""
+    p = water_depth_pressure(m)
+    return {
+        "key": f"ipx_{grade.lower()}_{m:g}",
+        "group": "水下浸水（静密封）",
+        "label": f"{grade}  {desc}（≈ {p:.3f} MPa）",
+        "p": p,
+        "medium": "水 / 水-乙二醇",
+        "motion": "静态",
+        "t": (5, 40),
+        "note": (f"{grade} 按 IEC 60529 / GB/T 4208 定义，{m:g} m 水柱 ≈ {p:.3f} MPa。"
+                 f"浸水防护属静密封工况，压缩率按 GB/T 3452.3 图A.3 静密封允许区间取值；"
+                 f"深水或长期浸泡建议取区间上部，并加装挡圈抑制挤出。"),
     }
 
 
@@ -331,15 +412,19 @@ PRESSURE_PRESETS = [
         "p": 1.0, "medium": "气动 / 空气", "motion": "往复", "t": (5, 60),
         "note": "高压气动 / 空压机排气口",
     },
-    # ---------- 水深 ----------
-    _depth_preset(3, motion="往复", medium="水 / 水-乙二醇", temp=(5, 40)),
-    _depth_preset(5, motion="往复", medium="水 / 水-乙二醇", temp=(5, 40)),
-    _depth_preset(10, motion="往复", medium="水 / 水-乙二醇", temp=(5, 40)),
-    _depth_preset(20, motion="往复", medium="水 / 水-乙二醇", temp=(5, 40)),
-    _depth_preset(30, motion="往复", medium="水 / 水-乙二醇", temp=(5, 40)),
-    _depth_preset(50, motion="往复", medium="水 / 水-乙二醇", temp=(5, 40)),
-    _depth_preset(100, motion="往复", medium="水 / 水-乙二醇", temp=(5, 40)),
-    _depth_preset(300, motion="静态", medium="水 / 水-乙二醇", temp=(5, 40)),
+    # ---------- 水深（只带入压力与介质，运动方式交给用户）----------
+    _depth_preset(3),
+    _depth_preset(5),
+    _depth_preset(10),
+    _depth_preset(20),
+    _depth_preset(30),
+    _depth_preset(50),
+    _depth_preset(100),
+    _depth_preset(300),
+    # ---------- 水下浸水（IPX 防护等级，静密封）----------
+    _ipx_preset("IPX7", 1.0, "短时浸水 1 m"),
+    _ipx_preset("IPX8", 10.0, "持续浸水 10 m"),
+    _ipx_preset("IPX8", 30.0, "持续浸水 30 m"),
     # ---------- 液压 ----------
     {
         "key": "hd_16", "group": "液压", "label": "液压 1.6 MPa（低压）",
@@ -640,6 +725,115 @@ def recommend_materials(t_low: float, t_high: float, medium: str,
 
 
 # =====================================================================
+# 二·五、壳体（沟槽）材料
+# =====================================================================
+# 壳体材料从三条途径影响 O 圈设计：
+#   1. 线膨胀系数 α —— 温度变化时沟槽与 O 圈截面各自胀缩，压缩率随之漂移。
+#      漂移量 Δε ≈ ΔT·(α_橡胶 − α_壳体)，橡胶 α 远大于金属/塑料，故通常为正值
+#      （升温后压缩率变大）；α_壳体 越大，该漂移越小。塑料 α 大，温变时压缩率
+#      反而比金属壳体更稳定，但塑料另有蠕变问题（见第 3 条）。
+#   2. 弹性模量 E —— 塑料壳体刚度低，受压后沟槽变形张开间隙，挤出风险上升，
+#      因此塑料壳体需要更严格的挤出间隙校核。
+#   3. 蠕变 / 应力松弛 —— 塑料长期受压会失去部分压缩量，需提高初始压缩率补偿。
+HOUSING_MATERIALS = [
+    {"code": "steel", "name": "碳钢 / 合金钢", "group": "金属", "alpha": 11.7,
+     "E": 206000, "ra": 1.6, "p_max": None,
+     "note": "刚性好、沟槽尺寸稳定；需注意防锈与表面处理"},
+    {"code": "ss", "name": "不锈钢 304 / 316", "group": "金属", "alpha": 17.3,
+     "E": 193000, "ra": 1.6, "p_max": None,
+     "note": "耐蚀；α 比碳钢大，温变大时压缩率漂移略小"},
+    {"code": "al", "name": "铝合金 6061 / 7075", "group": "金属", "alpha": 23.6,
+     "E": 69000, "ra": 1.6, "p_max": None,
+     "note": "轻量、导热好；α 较大，阳极氧化面注意封孔"},
+    {"code": "brass", "name": "黄铜 / 青铜", "group": "金属", "alpha": 19.0,
+     "E": 100000, "ra": 1.6, "p_max": None,
+     "note": "管接头、阀体常用；注意脱锌腐蚀"},
+    {"code": "cast", "name": "铸铁", "group": "金属", "alpha": 10.5,
+     "E": 120000, "ra": 3.2, "p_max": None,
+     "note": "泵壳、阀体常用；表面较粗糙，沟槽需精加工"},
+    {"code": "abs", "name": "ABS", "group": "塑料", "alpha": 85.0,
+     "E": 2300, "ra": 1.6, "p_max": 2.5,
+     "note": "易成型、成本低；强度与耐温一般"},
+    {"code": "pc", "name": "PC（聚碳酸酯）", "group": "塑料", "alpha": 68.0,
+     "E": 2400, "ra": 1.6, "p_max": 3.0,
+     "note": "透明、抗冲击；长期浸水需注意水解老化"},
+    {"code": "pom", "name": "POM（聚甲醛）", "group": "塑料", "alpha": 110.0,
+     "E": 3000, "ra": 1.6, "p_max": 3.5,
+     "note": "刚性好、耐磨；α 最大，温变时压缩率漂移最小"},
+    {"code": "pa", "name": "PA66（尼龙）", "group": "塑料", "alpha": 90.0,
+     "E": 2900, "ra": 1.6, "p_max": 3.0,
+     "note": "韧性好；吸水性大，长期浸水尺寸会变化"},
+    {"code": "pp", "name": "PP（聚丙烯）", "group": "塑料", "alpha": 120.0,
+     "E": 1400, "ra": 1.6, "p_max": 2.0,
+     "note": "耐化学性好；模量最低，受压变形最明显"},
+]
+
+HOUSING_BY_CODE = {m["code"]: m for m in HOUSING_MATERIALS}
+
+# 橡胶线膨胀系数（1e-6/K）。橡胶的体积膨胀远大于线膨胀，工程近似取此值。
+RUBBER_ALPHA = {"NBR": 180.0, "HNBR": 180.0, "FKM": 190.0, "FFKM": 190.0,
+                "VMQ": 220.0, "EPDM": 200.0, "CR": 190.0, "PU": 180.0,
+                "PTFE": 120.0, "AFLAS": 180.0, "IIR": 190.0, "ACM": 180.0}
+RUBBER_ALPHA_DEFAULT = 180.0
+
+
+def housing_effect(code: str, material_code: str,
+                   t_high: float | None, pressure: float) -> dict:
+    """壳体材料对压缩率与挤出间隙的影响。
+
+    返回 dict：壳体信息、热漂移 Δε(百分点)、塑料补偿量、警告与说明。
+    """
+    h = HOUSING_BY_CODE.get(code or "")
+    if h is None:
+        return {"code": None, "group": None, "d_comp_pp": 0.0,
+                "creep_pp": 0.0, "warnings": [], "notes": []}
+
+    warnings: list[str] = []
+    notes: list[str] = []
+    ar = RUBBER_ALPHA.get(material_code, RUBBER_ALPHA_DEFAULT)
+    ah = h["alpha"]
+
+    dT = 0.0
+    if t_high is not None:
+        dT = max(0.0, float(t_high) - 20.0)
+    d_comp = dT * (ar - ah) * 1e-6 * 100.0
+
+    creep = 0.0
+    if h["group"] == "塑料":
+        creep = 1.5
+        notes.append(
+            f"壳体为塑料（{h['name']}），长期受压会产生蠕变与应力松弛，"
+            f"初始压缩率已在标准允许区间内上浮 {creep:.1f} 个百分点作补偿。")
+        pmax = h["p_max"]
+        if pmax is not None and pressure > pmax:
+            warnings.append(
+                f"壳体材料 {h['name']} 弹性模量仅 {h['E']} MPa，在 {pressure:.1f} MPa 下"
+                f"壳体与沟槽会明显变形（经验建议 ≤ {pmax:.1f} MPa），间隙张开后 O 圈"
+                f"挤出风险高：建议改用金属壳体、加装挡圈，或增加壁厚 / 加金属嵌件增强。")
+        if pressure > 0.5:
+            notes.append(
+                "塑料壳体受压时沟槽会弹性变形并张开间隙，请按更严格的挤出间隙校核，"
+                "必要时加装挡圈。")
+        if t_high is not None and t_high > 120:
+            notes.append(
+                "塑料壳体的耐温远低于氟 / 硅橡胶，高温下壳体软化可能先于密封圈失效，"
+                "请核对壳体材料的连续使用温度。")
+
+    if dT > 0:
+        notes.append(
+            f"由 20 ℃ 升至 {t_high:.0f} ℃，橡胶与壳体线膨胀系数之差使压缩率漂移约 "
+            f"{d_comp:+.2f} 个百分点（橡胶 {ar:.0f}×10⁻⁶/K vs 壳体 {ah:.1f}×10⁻⁶/K）。")
+
+    return {
+        "code": h["code"], "name": h["name"], "group": h["group"],
+        "alpha": ah, "E": h["E"], "ra": h["ra"], "p_max": h["p_max"],
+        "rubber_alpha": ar, "dT": round(dT, 1), "d_comp_pp": round(d_comp, 2),
+        "creep_pp": creep, "note": h["note"],
+        "warnings": warnings, "notes": notes,
+    }
+
+
+# =====================================================================
 # 三、硬度与压缩率推荐
 # =====================================================================
 
@@ -677,39 +871,128 @@ def recommend_hardness(pressure: float, motion: str, medium: str,
     return base, why
 
 
-def recommend_compression(mode: str, motion: str, pressure: float,
-                          hardness: int) -> tuple[float, str]:
-    """返回 (推荐压缩率 %, 说明)。mode: radial / axial"""
+# ---- 压缩率允许范围（%）—— GB/T 3452.3-2005 附录 A ----
+# 标准按「工况类别 × 线径」给出允许区间，而不是一个与线径无关的固定百分比；
+# 静密封整体高于动密封，且线径越大允许区间越低。
+#   hyd    图A.1 液压动密封
+#   pneu   图A.2 气动动密封
+#   static 图A.3 液压、气动静密封
+#   axial  图A.4 轴向密封
+COMPRESSION_TABLE = {
+    "hyd": {
+        1.80: (13.0, 28.5), 2.65: (11.5, 24.0), 3.55: (9.5, 23.0),
+        5.30: (9.0, 20.5), 7.00: (9.0, 19.5),
+    },
+    "pneu": {
+        1.80: (9.5, 25.5), 2.65: (8.5, 22.0), 3.55: (6.5, 20.0),
+        5.30: (5.5, 17.0), 7.00: (5.0, 15.5),
+    },
+    "static": {
+        1.80: (13.5, 30.5), 2.65: (13.0, 28.0), 3.55: (11.5, 27.5),
+        5.30: (11.0, 26.0), 7.00: (10.5, 24.0),
+    },
+    "axial": {
+        1.80: (22.5, 34.5), 2.65: (21.0, 30.0), 3.55: (19.0, 26.0),
+        5.30: (16.0, 24.0), 7.00: (15.0, 21.0),
+    },
+}
+
+COMPRESSION_KIND_NAME = {
+    "hyd": "图A.1 液压动密封",
+    "pneu": "图A.2 气动动密封",
+    "static": "图A.3 液压、气动静密封",
+    "axial": "图A.4 轴向密封",
+}
+
+# 压缩率类别与沟槽锚点表使用同一套键名（static / hyd / pneu / axial），无需映射。
+
+
+def compression_kind(mode: str, motion: str, medium: str = "") -> str:
+    """判定该工况应查 GB/T 3452.3-2005 附录 A 的哪张压缩率表。
+
+    回转密封标准未单列，按动密封里最低的一档（气动动密封）从严取值。
+    """
     if mode == "axial":
-        lo, hi = 25.0, 30.0
-        base = 27.5
-        why = "轴向端面静密封，压缩率取 25%~30% 以保证低压缩应力下的密封"
+        return "axial"
+    if motion == "静态":
+        return "static"
+    if any(k in (medium or "") for k in ("气", "真空", "空气")):
+        return "pneu"
+    return "hyd"
+
+
+def compression_band(d2: float, kind: str) -> tuple[float, float, str]:
+    """按线径返回压缩率允许区间 (min%, max%, 来源说明)。
+
+    标准附录 A 只列出 1.80 / 2.65 / 3.55 / 5.30 / 7.00 五档线径；
+    其余线径在相邻两档之间线性插值，超出两端时收敛到最近档（不作外推）。
+    """
+    tbl = COMPRESSION_TABLE.get(kind) or COMPRESSION_TABLE["static"]
+    xs = sorted(tbl)
+    nm = COMPRESSION_KIND_NAME.get(kind, kind)
+    if d2 <= xs[0]:
+        lo, hi = tbl[xs[0]]
+        return lo, hi, f"GB/T 3452.3-2005 {nm}（按最小档 d₂ {xs[0]:.2f} 取值）"
+    if d2 >= xs[-1]:
+        lo, hi = tbl[xs[-1]]
+        return lo, hi, f"GB/T 3452.3-2005 {nm}（按最大档 d₂ {xs[-1]:.2f} 取值）"
+    for i in range(len(xs) - 1):
+        x1, x2 = xs[i], xs[i + 1]
+        if x1 <= d2 <= x2:
+            k = (d2 - x1) / (x2 - x1)
+            lo = tbl[x1][0] + (tbl[x2][0] - tbl[x1][0]) * k
+            hi = tbl[x1][1] + (tbl[x2][1] - tbl[x1][1]) * k
+            if k <= 1e-9 or k >= 1.0 - 1e-9:
+                return round(lo, 2), round(hi, 2), f"GB/T 3452.3-2005 {nm}"
+            return round(lo, 2), round(hi, 2), (
+                f"GB/T 3452.3-2005 {nm}（按 d₂ {x1:.2f}~{x2:.2f} 插值）")
+    lo, hi = tbl[xs[-1]]
+    return lo, hi, f"GB/T 3452.3-2005 {nm}"
+
+
+def recommend_compression(mode: str, motion: str, pressure: float,
+                          hardness: int, d2: float = 3.55,
+                          medium: str = "") -> tuple[float, str]:
+    """返回 (推荐压缩率 %, 说明)。
+
+    取值逻辑：以国标附录 A 的允许区间为边界，以标准沟槽深度隐含的压缩率作
+    基准（保证与 GB/T 3452.3 沟槽尺寸表自洽），再按压力 / 硬度在区间内微调。
+    mode: radial / axial
+    """
+    kind = compression_kind(mode, motion, medium)
+    lo, hi, src = compression_band(d2, kind)
+    half = (hi - lo) / 2.0
+
+    # 基准：标准沟槽深度对应的压缩率
+    h_std, _b_std, _s = groove_std_pair(d2, kind)
+    e_std = (d2 - h_std) / d2 * 100.0
+    base = max(lo, min(hi, e_std))
+
+    why = f"{src} 允许 {lo:.1f}%~{hi:.1f}%"
+    why += f"；标准槽深 {h_std:.2f} mm 对应 {e_std:.1f}%，以此为基准"
+    if e_std > hi + 0.05 or e_std < lo - 0.05:
+        why += "（注意：该档标准槽深与压缩率表略有出入，已按允许区间收口，建议对照标准原文复核）"
+
+    if kind in ("static", "axial"):
+        base = max(lo, min(hi, base + 0.10 * half))
+        why += "；静密封取中偏上以建立可靠的初始接触应力"
     else:
-        if motion == "静态":
-            lo, hi = 15.0, 25.0
-            base = 18.0
-            why = "径向静密封，标准推荐 15%~25%"
-        elif motion == "往复":
-            lo, hi = 12.0, 18.0
-            base = 14.5
-            why = "径向往复动密封，标准推荐 10%~20%，取中下限以减少摩擦与发热"
-        else:
-            lo, hi = 8.0, 15.0
-            base = 11.0
-            why = "回转动密封，标准推荐 8%~15%，压缩率宜小以避免摩擦热膨胀"
+        base = max(lo, min(hi, base - 0.05 * half))
+        why += "；动密封取中偏下以减小摩擦与发热"
+        if motion == "回转":
+            why += "；回转工况附录 A 未单列，已按动密封从严取值"
 
-        # 压力修正
-        if pressure > 20.0:
-            base += 2.5
-            why += "；高压工况上浮压缩率以补偿挤出变形"
-        elif pressure < 2.0:
-            base += 1.0
-            why += "；低压工况适当上浮以保证初始密封"
+    if pressure > 20.0:
+        base = max(lo, min(hi, base + 0.15 * half))
+        why += "；高压工况向区间上部靠拢以补偿挤出变形"
+    elif pressure < 2.0:
+        base = max(lo, min(hi, base + 0.10 * half))
+        why += "；低压 / 浸水工况向区间上部靠拢以保证初始密封"
 
-    # 高硬度胶料回弹差，压缩率略增
     if hardness >= 90:
-        base += 1.0
-    base = max(lo, min(hi, base))
+        base = max(lo, min(hi, base + 0.5))
+        why += "；高硬度胶料回弹差，压缩率略增"
+
     return round(base, 2), why
 
 
@@ -828,7 +1111,8 @@ def groove_dims(d2: float, mode: str, motion: str,
                 compression_pct: float | None = None,
                 width: float | None = None,
                 t_high: float | None = None,
-                backup_n: int = 0) -> dict:
+                backup_n: int = 0,
+                medium: str = "") -> dict:
     """解算槽深 h 与槽宽 b。
 
     mode: 'radial' | 'axial'
@@ -838,7 +1122,7 @@ def groove_dims(d2: float, mode: str, motion: str,
 
     backup_n: 需要额外占位的挡圈数量（0 = 不加挡圈）
     """
-    kind = "axial" if mode == "axial" else ("dynamic" if motion != "静态" else "static")
+    kind = compression_kind(mode, motion, medium)
 
     # ---- 标准锚点表按线径插值 ----
     h_std, b_std, b_std_src = groove_std_pair(d2, kind)
@@ -914,7 +1198,8 @@ def design(mode: str,
            material: str | None = None,
            stretch_pct: float | None = None,
            backup_mode: str = "auto",
-           clearance: float | None = None) -> dict:
+           clearance: float | None = None,
+           housing: str | None = None) -> dict:
     """统一设计解算入口。
 
     mode:
@@ -986,13 +1271,24 @@ def design(mode: str,
         )
 
     # ---------- 3. 压缩率 ----------
+    comp_kind = compression_kind(calc_mode, motion, medium)
+    comp_lo, comp_hi, comp_rule = compression_band(d2, comp_kind)
     if compression_pct is None:
         compression_pct, comp_why = recommend_compression(
-            calc_mode, motion, pressure, hardness)
+            calc_mode, motion, pressure, hardness, d2=d2, medium=medium)
         comp_src = "自动推荐"
     else:
         comp_src = "手动指定"
-        comp_why = "由用户指定"
+        comp_why = f"由用户指定；{comp_rule} 允许 {comp_lo:.1f}%~{comp_hi:.1f}%"
+
+    # ---------- 3b. 壳体（沟槽）材料影响 ----------
+    he = housing_effect(housing, material, t_high, pressure)
+    if he.get("code"):
+        notes.extend(he["notes"])
+        warnings.extend(he["warnings"])
+        # 塑料壳体的蠕变补偿只作用于自动推荐，不覆盖用户手填的压缩率
+        if he["creep_pp"] and comp_src == "自动推荐":
+            compression_pct = round(min(comp_hi, compression_pct + he["creep_pp"]), 2)
 
     # ---------- 4. 挡圈判定（须在沟槽宽度解算之前，挡圈要占用槽宽）----------
     gap_allow = allowed_extrusion_gap(hardness, pressure)
@@ -1041,7 +1337,7 @@ def design(mode: str,
     gv = groove_dims(d2, calc_mode, motion,
                      compression_pct=compression_pct,
                      width=groove_width, t_high=t_high,
-                     backup_n=backup_n)
+                     backup_n=backup_n, medium=medium)
     h = gv["h"]
     b = gv["b"]
     if gv["temp_note"]:
@@ -1201,32 +1497,57 @@ def design(mode: str,
         h_tol = 0.05
     else:
         h_tol = 0.08
+    # ---- 圆角 / 导入倒角（GB/T 3452.3-2005）----
+    ef = edge_fillet_lead(d2)
+    is_dyn = comp_kind in ("hyd", "pneu")
+    ra_static, ra_dyn = 0.8, 0.4
     machining = {
         "h_tol": h_tol,
         "b_tol_plus": 0.10,
         "bottom_tol": "h9",
         "outer_tol": "H9",
-        "fillet_r": round(min(0.20, 0.08 * d2), 3),
-        "lead_angle": "15° ~ 30°",
-        "note": "槽底与槽侧表面粗糙度 Ra ≤ 0.8 μm；动密封 Ra ≤ 0.4 μm；"
-                "槽口应倒角或圆角并去毛刺，避免装配时划伤 O 圈。",
+        "fillet_r": ef["r2"][1],
+        "lead_angle": f"{ef['lead_angle'][0]:.0f}° ~ {ef['lead_angle'][1]:.0f}°",
+        "ra_static": ra_static,
+        "ra_dyn": ra_dyn,
+        "note": f"槽底与槽侧表面粗糙度 Ra ≤ {ra_static} μm"
+                + (f"；动密封 Ra ≤ {ra_dyn} μm" if is_dyn else "")
+                + "；所有 O 圈经过的棱边必须去毛刺、去飞边。",
     }
+    assembly = {
+        "r1": ef["r1"], "r2": ef["r2"],
+        "lead_angle": ef["lead_angle"], "lead_angle_rec": ef["lead_angle_rec"],
+        "lead_zmin": ef["lead_zmin"], "lead_zmin_src": ef["lead_zmin_src"],
+        "in_table": ef["in_table"],
+        "note": f"导入倒角 {ef['lead_angle'][0]:.0f}°~{ef['lead_angle'][1]:.0f}°"
+                f"（推荐 {ef['lead_angle_rec']:.0f}°），最小导角长度 Zmin ≥ "
+                f"{ef['lead_zmin']:.2f} mm；槽底圆角 r₁ "
+                f"{ef['r1'][0]:.2f}~{ef['r1'][1]:.2f} mm，槽口圆角 r₂ "
+                f"{ef['r2'][0]:.2f}~{ef['r2'][1]:.2f} mm。装配前在 O 圈与导入角涂抹"
+                f"与介质相容的润滑剂，可显著降低安装时的划伤与扭曲。",
+    }
+    if not ef["in_table"]:
+        notes.append(
+            f"线径 {d2:.2f} mm 超出 GB/T 3452.3 表1 的 1.80~7.00 mm 范围，"
+            f"圆角与导角长度按最接近的档位取值，量产前请按标准原文复核。")
 
     # ---------- 9. 校核 ----------
-    # 压缩率
-    if is_axial:
-        e_lo, e_hi = 22.0, 32.0
-    elif motion == "静态":
-        e_lo, e_hi = 14.0, 26.0
-    elif motion == "往复":
-        e_lo, e_hi = 10.0, 20.0
-    else:
-        e_lo, e_hi = 7.0, 15.0
+    # 压缩率：区间与推荐同源，取自 GB/T 3452.3-2005 附录 A
+    e_lo, e_hi = comp_lo, comp_hi
     if not (e_lo <= comp_pct <= e_hi):
         warnings.append(
-            f"压缩率 {comp_pct:.2f}% 超出推荐区间 {e_lo:.0f}%~{e_hi:.0f}%，"
-            f"回弹补偿与密封可靠性可能不足或装配困难。"
+            f"压缩率 {comp_pct:.2f}% 超出 {comp_rule} 的允许区间 "
+            f"{e_lo:.1f}%~{e_hi:.1f}%，回弹补偿与密封可靠性可能不足或装配困难。"
         )
+
+    # 高温工况下壳体热膨胀导致的压缩率漂移
+    if he.get("code") and abs(he["d_comp_pp"]) > 0.05:
+        e_hot = comp_pct + he["d_comp_pp"]
+        if not (e_lo <= e_hot <= e_hi):
+            warnings.append(
+                f"升至 {t_high:.0f} ℃ 时压缩率估算为 {e_hot:.2f}%"
+                f"（常温 {comp_pct:.2f}% 叠加热漂移 {he['d_comp_pp']:+.2f} 个百分点），"
+                f"已超出允许区间 {e_lo:.1f}%~{e_hi:.1f}%，请复核高温工况下的密封可靠性。")
 
     # 拉伸率
     st_lo, st_hi = (0.0, 5.0) if not is_axial else (0.0, 3.0)
@@ -1316,6 +1637,8 @@ def design(mode: str,
         },
         "fit": fit,
         "machining": machining,
+        "assembly": assembly,
+        "housing": he,
         "material": {
             "code": mat_obj.code,
             "name": mat_obj.name,
@@ -1331,7 +1654,8 @@ def design(mode: str,
         "hardness": {
             "value": hardness, "src": hardness_src, "why": hard_why,
         },
-        "compression_src": {"src": comp_src, "why": comp_why},
+        "compression_src": {"src": comp_src, "why": comp_why,
+                            "rule": comp_rule, "kind": comp_kind},
         "stretch_src": {"src": st_src},
         "input": {
             "mode": mode, "surface_dia": surface_dia, "pressure": pressure,

@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QComboBox,
                                QWidget)
 
 from core.oring_core import (D1_SERIES, D2_ALL, D2_MAX, D2_MIN, D2_TAG,
-                             DESIGN_DOC, MATERIALS, MEDIA_LIST,
+                             DESIGN_DOC, HOUSING_MATERIALS, MATERIALS, MEDIA_LIST,
                              PRESSURE_PRESETS, DesignError, d1_range,
                              d2_family, d2_tolerance, design, groove_std_pair,
                              recommend_d2, recommend_materials)
@@ -387,14 +387,20 @@ class DesignPage(QWidget):
         c3.add(self.in_hard)
         sc.addWidget(c3)
 
-        # 装配与校核
-        c4 = Card("装配与校核")
+        # 壳体与装配
+        c4 = Card("壳体与装配", "壳体材料影响热膨胀与受压变形")
+        hs = ["未指定"] + [f"{m['code']}　{m['name']}（{m['group']}）"
+                           for m in HOUSING_MATERIALS]
+        self.in_housing = ComboInput("壳体材料", hs)
+        self.in_housing.set_tip("金属壳体刚性好但线膨胀系数小；塑料壳体线膨胀系数大、"
+                                "易蠕变，会自动上浮压缩率补偿，并提示受压变形风险")
         self.in_backup = ComboInput("挡圈配置", ["自动判定", "不加挡圈",
                                                  "单侧挡圈", "两侧各一个"])
         self.in_backup.set_tip("挡圈会占用槽宽，影响自动推荐的槽宽值。"
                                "往复 / 回转密封为双作用，自动判定取两侧各一个")
         self.in_gap = NumberInput("设计单侧间隙", "mm", "不校核")
         self.in_stretch = NumberInput("内径拉伸率", "%", "自动")
+        c4.add(self.in_housing)
         c4.add(self.in_backup)
         c4.add(self.in_gap)
         c4.add(self.in_stretch)
@@ -517,7 +523,8 @@ class DesignPage(QWidget):
                   self.in_hard, self.in_gap, self.in_stretch, self.in_tlow,
                   self.in_thigh):
             w.on_change(lambda _t: self._timer.start())
-        for w in (self.in_medium, self.in_motion, self.in_mat, self.in_backup):
+        for w in (self.in_medium, self.in_motion, self.in_mat, self.in_backup,
+                  self.in_housing):
             w.on_change(lambda _i: self._timer.start())
         # 线径为可编辑下拉框：既要响应选项切换，也要响应手工输入
         self.in_d2.on_text_change(lambda _t: self._timer.start())
@@ -584,6 +591,7 @@ class DesignPage(QWidget):
         self.in_d2.combo.setCurrentIndex(0)
         self.in_mat.combo.setCurrentIndex(0)
         self.in_backup.combo.setCurrentIndex(0)
+        self.in_housing.combo.setCurrentIndex(0)
         self.in_preset.combo.setCurrentIndex(0)
         self.lbl_d2.setText("")
         self.lbl_b.setText("")
@@ -651,6 +659,9 @@ class DesignPage(QWidget):
                        "单侧挡圈": "single", "两侧各一个": "double"}.get(
             self.in_backup.current(), "auto")
 
+        hs = self.in_housing.current().strip()
+        housing = None if (not hs or hs.startswith("未指定")) else hs.split("　")[0].strip()
+
         return dict(
             mode=self.mode,
             surface_dia=dia,
@@ -667,6 +678,7 @@ class DesignPage(QWidget):
             stretch_pct=self.in_stretch.value(),
             backup_mode=backup_mode,
             clearance=self.in_gap.value(),
+            housing=housing,
         )
 
     def recalc(self, initial: bool = False, force: bool = False):
@@ -779,8 +791,13 @@ class DesignPage(QWidget):
         rw.add("槽宽公差", f"+{mc['b_tol_plus']:.2f} / 0 mm")
         rw.add("槽底径公差", mc["bottom_tol"])
         rw.add("沟槽外径公差", mc["outer_tol"])
-        rw.add("槽口圆角", f"R ≤ {mc['fillet_r']:.2f} mm")
-        rw.add("导入角", mc["lead_angle"])
+        asm = r["assembly"]
+        rw.add("槽底圆角 r₁", f"{asm['r1'][0]:.2f} ~ {asm['r1'][1]:.2f} mm")
+        rw.add("槽口圆角 r₂", f"{asm['r2'][0]:.2f} ~ {asm['r2'][1]:.2f} mm")
+        rw.add("导入倒角", f"{asm['lead_angle'][0]:.0f}° ~ {asm['lead_angle'][1]:.0f}°"
+                           f"（推荐 {asm['lead_angle_rec']:.0f}°）")
+        rw.add("最小导角长度", f"Zmin ≥ {asm['lead_zmin']:.2f} mm", bold=True)
+        rw.add("表面粗糙度", f"Ra ≤ {mc['ra_static']} μm")
 
         # 装配校核
         rw = self.row_fit
@@ -804,6 +821,15 @@ class DesignPage(QWidget):
         else:
             rw.add("挡圈", "可不配置", color=TEXT)
         rw.add("挡圈判定", m["backup_src"], color=TEXT_DIM)
+        ho = r.get("housing") or {}
+        if ho.get("code"):
+            rw.add_sep()
+            rw.add("壳体材料", f"{ho['name']}（{ho['group']}）", bold=True)
+            rw.add("线膨胀系数", f"{ho['alpha']:.1f} ×10⁻⁶/K")
+            rw.add("热漂移", f"{ho['d_comp_pp']:+.2f} 个百分点（至 {ho['dT']:.0f} ℃）",
+                   color=TEXT_DIM)
+            if ho.get("creep_pp"):
+                rw.add("蠕变补偿", f"+{ho['creep_pp']:.1f} 个百分点", color=WARN)
         rw.add_sep()
         rw.add("填充率 K", f"{m['fill_pct']:.1f}%")
 
@@ -1330,6 +1356,23 @@ HELP_HTML = """
 <p><code>压缩量 c = d2 − h</code>　　<code>压缩率 ε = (d2 − h) / d2 × 100%</code></p>
 <p>其中 d2 为 O 圈线径（截面直径），h 为沟槽深度。压缩率是 O 圈产生初始接触应力、
 实现密封的根本来源。取值过大装配困难且加速老化，过小则回弹补偿不足而泄漏。</p>
+<p><b>压缩率允许范围取自 GB/T 3452.3-2005 附录 A</b>。该表按「工况类别 × 线径」给出区间：
+<b>静密封明显高于动密封，且线径越大允许区间越低</b>。本程序推荐值与校核区间都直接用这张表，
+非标准线径在相邻档之间线性插值（超出 1.80~7.00 时收敛到最近档，不作外推）：</p>
+<table>
+<tr><th>压缩率 %</th><th>1.80</th><th>2.65</th><th>3.55</th><th>5.30</th><th>7.00</th></tr>
+<tr><td>图A.3 液压、气动静密封</td><td>13.5~30.5</td><td>13.0~28.0</td><td>11.5~27.5</td><td>11.0~26.0</td><td>10.5~24.0</td></tr>
+<tr><td>图A.1 液压动密封</td><td>13.0~28.5</td><td>11.5~24.0</td><td>9.5~23.0</td><td>9.0~20.5</td><td>9.0~19.5</td></tr>
+<tr><td>图A.2 气动动密封</td><td>9.5~25.5</td><td>8.5~22.0</td><td>6.5~20.0</td><td>5.5~17.0</td><td>5.0~15.5</td></tr>
+<tr><td>图A.4 轴向密封</td><td>22.5~34.5</td><td>21.0~30.0</td><td>19.0~26.0</td><td>16.0~24.0</td><td>15.0~21.0</td></tr>
+</table>
+<p>取值方法：先算<b>标准沟槽深度</b>（同标准表1/表2/表3）隐含的压缩率作为基准，
+静密封再向区间上部靠拢（建立可靠初始接触应力），动密封向中下部靠拢（减小摩擦与发热），
+最后按压力与硬度在区间内微调。回转密封国标未单列，按动密封中最低的一档从严取值。</p>
+<div class="warn"><b>浸水防护（IPX7 / IPX8）属静密封工况</b>，运动方式应选「静态」，
+压缩率按图A.3 静密封表取值——通常落在 15%~30%，远高于动密封的 10%~20%。
+若误按「往复」设计，压缩量会明显不足，深水或长期浸泡时极易渗漏。
+深水或长期浸泡建议取区间上部，并加装挡圈抑制挤出。</div>
 
 <h3>拉伸率</h3>
 <p><code>δ = (沟槽底径 − O 圈内径) / O 圈内径 × 100%</code>（径向密封）</p>
@@ -1343,15 +1386,39 @@ HELP_HTML = """
 偏低说明沟槽过空，O 圈可能在介质压力下翻滚、扭曲（螺旋损伤）。</p>
 
 <h3>槽宽与槽深</h3>
-<p>槽深由压缩率反算：<code>h = d2 × (1 − ε)</code>。槽宽 <code>b</code> 由
-GB/T 3452.3 与 AS568 的沟槽标准锚点值（1.80 / 2.65 / 3.55 / 5.30 / 7.00 mm
-线径）随线径插值自动推荐；不在锚点上的线径按相邻锚点线性插值，超过 7 mm 时
-按末段斜率外推。此外还有两项修正：</p>
+<p>槽深由压缩率反算：<code>h = d2 × (1 − ε)</code>。槽宽 <code>b</code> 与标准槽深
+逐值取自 <b>GB/T 3452.3-2005 表1 / 表2 / 表3</b>（径向密封与轴向密封）。标准只列出
+1.80 / 2.65 / 3.55 / 5.30 / 7.00 mm 五档线径，其余线径按相邻档线性插值。另有两项修正：</p>
 <p>· <b>高温修正</b>：工作温度超过 100 ℃ 时按温升放宽容槽 1%~5%，为胶料热膨胀留空间。<br>
-· <b>挡圈占位</b>：需要挡圈时，每个挡圈按线径再占用 0.5 ~ 2.0 mm 槽宽
-（往复 / 回转密封为双作用，自动按两侧各一个计）。</p>
+· <b>挡圈占位</b>：需要挡圈时，每个挡圈按标准表1 的 b → b₁ → b₂ 差值占用槽宽，即
+1.40 mm（d₂ ≤ 3.55）、1.90 mm（d₂ = 5.30）、2.80 mm（d₂ = 7.00）；
+往复 / 回转为双作用，自动按两侧各一个计。</p>
 <p>槽宽可以留空交给程序推荐，也可以手动填写覆盖它 —— 输入框下方会同时显示
 自动推荐值，便于对比。</p>
+
+<h3>壳体（沟槽）材料</h3>
+<p>壳体材料从三方面影响设计，选定后程序会自动计入：</p>
+<table>
+<tr><th>影响途径</th><th>机理</th><th>程序处理</th></tr>
+<tr><td>线膨胀系数 α</td><td>温度变化时沟槽与 O 圈各自胀缩，压缩率漂移 ≈ ΔT·(α<sub>橡胶</sub> − α<sub>壳体</sub>)</td><td>给出漂移量；高温下越出允许区间则告警</td></tr>
+<tr><td>弹性模量 E</td><td>塑料壳体刚度低，受压后沟槽变形、张开间隙</td><td>超出经验许用压力时告警，建议加挡圈或加金属嵌件</td></tr>
+<tr><td>蠕变 / 应力松弛</td><td>塑料长期受压会失去部分压缩量</td><td>初始压缩率在标准区间内上浮 1.5 个百分点补偿</td></tr>
+</table>
+<p>金属壳体 α：铸铁 10.5、碳钢 11.7、不锈钢 17.3、黄铜 19.0、铝合金 23.6 ×10⁻⁶/K
+—— 尺寸稳定，但 α 越小升温后压缩率增量越大。塑料壳体 α 明显更大：PC 68、ABS 85、
+PA66 90、POM 110、PP 120 ×10⁻⁶/K，温变时压缩率更稳定，但需重点关注受压变形与蠕变。</p>
+
+<h3>安装圆角与导入倒角</h3>
+<p>O 圈在装配时非常脆弱，锐利棱边会像刀片一样割伤它。按 GB/T 3452.3-2005 表1 / 表3：</p>
+<table>
+<tr><th>项目</th><th>符号</th><th>推荐值</th></tr>
+<tr><td>槽底圆角</td><td>r₁</td><td>0.20~0.40（d₂ ≤ 2.65）/ 0.40~0.80（3.55~5.30）/ 0.80~1.20（≥ 7.00）mm</td></tr>
+<tr><td>槽口（棱）圆角</td><td>r₂</td><td>0.10~0.30 mm</td></tr>
+<tr><td>导入倒角角度</td><td>θ</td><td>15°~30°，推荐 20°（国标未规定角度，此为行业通行值）</td></tr>
+<tr><td>最小导角长度</td><td>Z<sub>min</sub></td><td>1.10 / 1.50 / 1.80 / 2.70 / 3.60 mm（按线径，标准表1 明列）</td></tr>
+</table>
+<p>表面粗糙度：静密封 Ra ≤ 0.8 μm，动密封 Ra ≤ 0.4 μm；所有 O 圈经过的棱边必须
+去毛刺、去飞边。装配前在 O 圈与导入角涂抹与介质相容的润滑剂，可显著降低安装损伤。</p>
 
 <h2>三、常用工况压力与水深的换算</h2>
 <p>工作压力可手动填写，也可以从「常用工况预设」里直接选：真空 / 微压、气动
