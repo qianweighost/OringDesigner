@@ -61,12 +61,15 @@
 ## 二、下载使用
 
 **免安装**：从本仓库的
-[Releases](https://github.com/qianweighost/OringDesigner/releases) 页面下载最新一版
-`O型密封圈设计计算器.exe`（约 34 MB，Windows 10/11 64 位），双击即用，
+[Releases](https://github.com/qianweighost/OringDesigner/releases) 页面下载
+**`OringDesigner-v1.2.exe`**（约 34 MB，Windows 10/11 64 位），双击即用，
 首次启动解压运行时约 3 ~ 5 秒。
 
 也可以直接取仓库里的
-[`dist/O型密封圈设计计算器.exe`](dist/O型密封圈设计计算器.exe)（与最新 Release 同一产物）。
+[`dist/O型密封圈设计计算器.exe`](dist/O型密封圈设计计算器.exe)，与最新 Release 是同一产物。
+
+> Release 附件用英文名是因为 GitHub 会丢弃附件名中的非 ASCII 字符 ——
+> 用中文名 `O型密封圈设计计算器.exe` 上传会被压缩成 `O.exe`。
 
 ---
 
